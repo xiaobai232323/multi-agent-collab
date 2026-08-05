@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """多模型协作 — DeepSeek + 千问"""
 
-import os, sys, json, shutil, platform
+import os, sys, json, shutil, platform, uuid, re
 from pathlib import Path
 from datetime import datetime
 import streamlit as st
@@ -29,6 +29,11 @@ BASE = Path(__file__).parent
 HD = BASE / "history"; HD.mkdir(parents=True, exist_ok=True)
 UP = BASE / "uploads"; UP.mkdir(parents=True, exist_ok=True)
 
+def _safe_id(name: str) -> str:
+    """消毒会话 ID，防止路径遍历"""
+    s = re.sub(r"[^0-9A-Za-z _-]", "_", name.strip())[:64]
+    return s or "default"
+
 @st.cache_resource
 def init_ds():
     from openai import OpenAI
@@ -40,10 +45,13 @@ def init_qw():
     dashscope.api_key = _env("DASHSCOPE_API_KEY")
 
 def ds_ask(msgs):
+    if tracker.warning_level() == "critical":
+        raise RuntimeError("预算已达上限，已阻止 API 调用。请在侧栏调整预算设置。")
     try:
         r = init_ds().chat.completions.create(model="deepseek-chat", messages=msgs, temperature=0.7, max_tokens=4096, timeout=60)
         tracker.record("deepseek-chat", r.usage.prompt_tokens, r.usage.completion_tokens)
         return r.choices[0].message.content
+    except RuntimeError: raise
     except Exception as e:
         msg = str(e)
         if "timeout" in msg.lower() or "timed out" in msg.lower():
@@ -55,6 +63,8 @@ def ds_ask(msgs):
         raise RuntimeError(f"DeepSeek 调用失败: {msg[:200]}")
 
 def qw_ask(msgs):
+    if tracker.warning_level() == "critical":
+        raise RuntimeError("预算已达上限，已阻止 API 调用。请在侧栏调整预算设置。")
     from dashscope import Generation
     try:
         r = Generation.call(model="qwen-max", messages=msgs, result_format="message")
@@ -70,6 +80,8 @@ def qw_ask(msgs):
         raise RuntimeError(f"千问网络错误: {e}")
 
 def qw_see(img, prompt):
+    if tracker.warning_level() == "critical":
+        raise RuntimeError("预算已达上限，已阻止 API 调用。请在侧栏调整预算设置。")
     from dashscope import MultiModalConversation
     p = str(Path(img).resolve())
     if not os.path.exists(p): return "图片不存在"
@@ -98,16 +110,19 @@ def list_sessions():
     return ss or [{"id":"default","title":"默认会话","time":"","n":0}]
 
 def load_msgs(sid):
-    f = HD / f"{sid}.json"
+    f = HD / f"{_safe_id(sid)}.json"
     return json.loads(f.read_text("utf-8")).get("messages",[]) if f.exists() else []
 
 def save_msgs(sid, title, msgs):
-    (HD / f"{sid}.json").write_text(json.dumps(
+    safe = _safe_id(sid)
+    tmp = HD / f"{safe}.json.tmp"
+    tmp.write_text(json.dumps(
         {"title":title,"updated":datetime.now().strftime("%m-%d %H:%M"),"messages":msgs},
         ensure_ascii=False, indent=2), "utf-8")
+    tmp.replace(HD / f"{safe}.json")  # 原子替换，防止并发写损坏
 
 def del_session(sid):
-    (HD / f"{sid}.json").unlink(missing_ok=True)
+    (HD / f"{_safe_id(sid)}.json").unlink(missing_ok=True)
 
 def _h(msgs):
     return [{"role":m["role"],"content":m["content"]} for m in msgs]
@@ -164,8 +179,9 @@ with st.sidebar:
     with c2:
         if st.button("➕ 新建", use_container_width=True):
             if new_name.strip():
-                save_msgs(new_name.strip(), new_name.strip(), [])
-                st.session_state.sid = new_name.strip()
+                sid = _safe_id(new_name.strip())
+                save_msgs(sid, new_name.strip(), [])
+                st.session_state.sid = sid
                 st.rerun()
 
     c3, c4 = st.columns(2)
@@ -195,10 +211,15 @@ with st.sidebar:
     upf = st.file_uploader("拖拽图片", type=["png","jpg","jpeg","gif","webp","bmp"], label_visibility="collapsed")
     img_path = None
     if upf:
-        if upf.size > 10 * 1024 * 1024:  # 10MB 限制
+        if upf.size > 10 * 1024 * 1024:
             st.error("图片过大，请上传 10MB 以内的文件")
         else:
-            dst = UP / upf.name; dst.write_bytes(upf.getvalue()); img_path = str(dst)
+            suffix = Path(upf.name).suffix or ".png"
+            safe = f"{uuid.uuid4().hex}{suffix}"
+            tmp = UP / (safe + ".tmp")
+            tmp.write_bytes(upf.getvalue())
+            tmp.replace(UP / safe)  # 原子写入
+            img_path = str(UP / safe)
             st.caption(f"📎 {upf.name}")
 
     st.divider()

@@ -33,7 +33,9 @@ def _load_json(path, default):
 
 
 def _save_json(path, data):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+    tmp.replace(path)  # 原子替换，防止并发写损坏
 
 
 class UsageTracker:
