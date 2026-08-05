@@ -4,6 +4,7 @@ history/
 uploads/
 context/
 usage.json
-.streamlit/
+budget.json
 *.lnk
 .env
+.pytest_cache/

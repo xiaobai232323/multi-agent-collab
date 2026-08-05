@@ -1,0 +1,18 @@
+[theme]
+primaryColor = "#3B4FE0"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F2F3F8"
+textColor = "#18181B"
+font = "sans-serif"
+
+[server]
+headless = true
+port = 8501
+
+[browser]
+serverAddress = "localhost"
+gatherUsageStats = false
+
+[client]
+# 隐藏右上角工具栏（三点菜单 + Deploy 按钮）
+toolbarMode = "viewer"
