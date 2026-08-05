@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """多模型协作 — DeepSeek + 千问"""
 
-import os, sys, json, shutil, platform, uuid, re
+import os, sys, json, shutil, platform, uuid, re, logging
 from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import streamlit as st
 from usage_tracker import tracker
+
+_log = logging.getLogger("multi_agent")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 if platform.system() == "Windows":
     try:
@@ -129,9 +133,18 @@ def _h(msgs):
 
 def run_review(msg, prev):
     msgs = _h(prev) + [{"role":"user","content":msg}]
-    a1 = ds_ask(msgs); a2 = qw_ask(msgs)
-    r1 = ds_ask([{"role":"system","content":"严苛审稿，从准确性/完整性/逻辑性/可读性评分指正。"},{"role":"user","content":f"审查:\n{a2}"}])
-    r2 = qw_ask([{"role":"system","content":"严苛审稿，从准确性/完整性/逻辑性/可读性评分指正。"},{"role":"user","content":f"审查:\n{a1}"}])
+    # 并行调用两模型，减少等待时间
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f1 = ex.submit(ds_ask, msgs)
+        f2 = ex.submit(qw_ask, msgs)
+        a1 = f1.result(timeout=120)
+        a2 = f2.result(timeout=120)
+    # 审查也可并行
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f3 = ex.submit(ds_ask, [{"role":"system","content":"严苛审稿，从准确性/完整性/逻辑性/可读性评分指正。"},{"role":"user","content":f"审查:\n{a2}"}])
+        f4 = ex.submit(qw_ask, [{"role":"system","content":"严苛审稿，从准确性/完整性/逻辑性/可读性评分指正。"},{"role":"user","content":f"审查:\n{a1}"}])
+        r1 = f3.result(timeout=120)
+        r2 = f4.result(timeout=120)
     f = ds_ask([{"role":"system","content":"综合两份回答和审查意见，输出最优答案。"},{"role":"user","content":f"DeepSeek:\n{a1}\n\n千问:\n{a2}\n\nDS审千问:\n{r1}\n\n千问审DS:\n{r2}"}])
     return f"### 🤖 DeepSeek\n\n{a1}\n\n---\n\n### 🧠 千问\n\n{a2}\n\n---\n\n### 🔍 DeepSeek 审查千问\n\n{r1}\n\n### 🔍 千问审查 DeepSeek\n\n{r2}\n\n---\n\n### ⭐ 综合最优\n\n{f}"
 
@@ -291,8 +304,10 @@ if prompt:
                 st.caption(f"[{tag}]")
                 st.markdown(ans)
             except Exception as e:
-                st.error(f"❌ {e}")
-                ans = str(e); tag = "error"
+                err_id = uuid.uuid4().hex[:8]
+                _log.exception("Unhandled error id=%s", err_id)
+                st.error(f"服务异常（错误 ID: {err_id}），请稍后重试")
+                ans = f"系统错误 [{err_id}]"; tag = "error"
 
         msgs.append({"role":"assistant","content":ans,"metadata":{"model":tag}})
         save_msgs(st.session_state.sid, msgs[0]["content"][:30] if msgs else "新对话", msgs)
