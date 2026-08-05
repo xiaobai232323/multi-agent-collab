@@ -40,30 +40,53 @@ def init_qw():
     dashscope.api_key = _env("DASHSCOPE_API_KEY")
 
 def ds_ask(msgs):
-    r = init_ds().chat.completions.create(model="deepseek-chat", messages=msgs, temperature=0.7, max_tokens=4096)
-    tracker.record("deepseek-chat", r.usage.prompt_tokens, r.usage.completion_tokens)
-    return r.choices[0].message.content
+    try:
+        r = init_ds().chat.completions.create(model="deepseek-chat", messages=msgs, temperature=0.7, max_tokens=4096, timeout=60)
+        tracker.record("deepseek-chat", r.usage.prompt_tokens, r.usage.completion_tokens)
+        return r.choices[0].message.content
+    except Exception as e:
+        msg = str(e)
+        if "timeout" in msg.lower() or "timed out" in msg.lower():
+            raise RuntimeError("DeepSeek 请求超时，请重试")
+        if "rate" in msg.lower() or "429" in msg:
+            raise RuntimeError("DeepSeek 请求过于频繁，请稍后重试")
+        if "auth" in msg.lower() or "401" in msg or "403" in msg:
+            raise RuntimeError("DeepSeek API Key 无效，请检查环境变量 DEEPSEEK_API_KEY")
+        raise RuntimeError(f"DeepSeek 调用失败: {msg[:200]}")
 
 def qw_ask(msgs):
     from dashscope import Generation
-    r = Generation.call(model="qwen-max", messages=msgs, result_format="message")
-    if r.status_code == 200:
-        u = r.usage; tracker.record("qwen-max", u.input_tokens, u.output_tokens)
-        return r.output.choices[0].message.content
-    raise RuntimeError(str(r.message))
+    try:
+        r = Generation.call(model="qwen-max", messages=msgs, result_format="message")
+        if r.status_code == 200:
+            u = r.usage; tracker.record("qwen-max", u.input_tokens, u.output_tokens)
+            return r.output.choices[0].message.content
+        code = getattr(r, 'status_code', '?')
+        if code == 429: raise RuntimeError("千问请求过于频繁，请稍后重试")
+        if code in (401, 403): raise RuntimeError("千问 API Key 无效，请检查环境变量 DASHSCOPE_API_KEY")
+        raise RuntimeError(f"千问调用失败 (code={code}): {r.message}")
+    except RuntimeError: raise
+    except Exception as e:
+        raise RuntimeError(f"千问网络错误: {e}")
 
 def qw_see(img, prompt):
     from dashscope import MultiModalConversation
     p = str(Path(img).resolve())
     if not os.path.exists(p): return "图片不存在"
-    r = MultiModalConversation.call(model="qwen-vl-max", messages=[{
-        "role": "user", "content": [{"image": f"file://{p}"}, {"text": prompt or "请详细描述这张图片"}]
-    }])
-    if r.status_code == 200:
-        u = r.usage; tracker.record("qwen-vl-max", u.input_tokens, u.output_tokens, image_count=1)
-        c = r.output.choices[0].message.content
-        return "".join(i.get("text","") if isinstance(i,dict) else str(i) for i in c) if isinstance(c,list) else c
-    raise RuntimeError(str(r.message))
+    try:
+        r = MultiModalConversation.call(model="qwen-vl-max", messages=[{
+            "role": "user", "content": [{"image": f"file://{p}"}, {"text": prompt or "请详细描述这张图片"}]
+        }])
+        if r.status_code == 200:
+            u = r.usage; tracker.record("qwen-vl-max", u.input_tokens, u.output_tokens, image_count=1)
+            c = r.output.choices[0].message.content
+            return "".join(i.get("text","") if isinstance(i,dict) else str(i) for i in c) if isinstance(c,list) else c
+        code = getattr(r, 'status_code', '?')
+        if code == 429: raise RuntimeError("千问视觉请求过于频繁，请稍后重试")
+        raise RuntimeError(f"千问视觉调用失败 (code={code}): {r.message}")
+    except RuntimeError: raise
+    except Exception as e:
+        raise RuntimeError(f"千问视觉网络错误: {e}")
 
 def list_sessions():
     ss = []
@@ -172,8 +195,11 @@ with st.sidebar:
     upf = st.file_uploader("拖拽图片", type=["png","jpg","jpeg","gif","webp","bmp"], label_visibility="collapsed")
     img_path = None
     if upf:
-        dst = UP / upf.name; dst.write_bytes(upf.getvalue()); img_path = str(dst)
-        st.caption(f"📎 {upf.name}")
+        if upf.size > 10 * 1024 * 1024:  # 10MB 限制
+            st.error("图片过大，请上传 10MB 以内的文件")
+        else:
+            dst = UP / upf.name; dst.write_bytes(upf.getvalue()); img_path = str(dst)
+            st.caption(f"📎 {upf.name}")
 
     st.divider()
     st.subheader("💰 用量")
